@@ -851,7 +851,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
     <div class="form-group"><label>اسم المجلد</label><input type="text" id="new-folder-name" placeholder="مثال: ألحان الأحد"></div>
     <div class="form-group"><label>وصف (اختياري)</label><textarea id="new-folder-desc" rows="2" placeholder="وصف مختصر للمجلد…"></textarea></div>
     <div class="form-group">
-      <label>لمين المجلد؟</label>
+      <label></label>
       <select id="new-folder-target" style="display:none"><option value="all">الكل</option></select>
     </div>
     <div style="display:flex; gap:0.7rem; margin-top:0.5rem; flex-wrap:wrap;">
@@ -1234,7 +1234,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
         </div>
         <div class="vm-grid">
           <div class="form-group" style="margin-bottom:0;"><label>اسم اللحن</label><input type="text" id="vm-title" placeholder="e.g., Practice Notes for Sunday"></div>
-          <div class="form-group" style="margin-bottom:0;"><label>لمين الرسالة؟</label><select id="vm-target" style="display:none"><option value="all">الكل</option></select></div>
+          <div class="form-group" style="margin-bottom:0;"><label></label><select id="vm-target" style="display:none"><option value="all">الكل</option></select></div>
         </div>
         <div class="form-group" style="margin-top:1rem;"><label>ملاحظات أو الوصف</label><textarea id="vm-note" rows="2" placeholder="اكتب ملاحظاتك هنا"></textarea></div>
         <div class="record-or-upload">
@@ -1645,192 +1645,153 @@ async function boot() {
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  FIRESTORE ADAPTER
-//  Converts Supabase-style  sb.from('col').select/insert/update/delete
-//  to Firestore calls.  Returns the same { data, error } shape.
+//  FIRESTORE ADAPTER  (v3 — full native Firestore, zero Supabase deps)
 // ══════════════════════════════════════════════════════════════════
-function fsCol(name) { return db.collection(name); }
-
-// Lightweight query builder returned by fsFrom()
 class FsQuery {
-  constructor(colName) {
-    this._col     = colName;
-    this._filters = [];   // [{field, op, val}]
-    this._orders  = [];   // [{field, dir}]
+  constructor(col) {
+    this._col = col;
+    this._wheres  = [];   // {field, op, val}
+    this._orders  = [];   // {field, dir}
     this._limitN  = null;
-    this._selectFields = null;
     this._isSingle = false;
-    this._notFilters = [];
-    this._orFilters  = [];
-    this._inFilter   = null;
-    this._isFilter   = null;
+    this._countOnly = false;
+    this._orFilters = [];
   }
 
-  select(fields, opts) {
-    this._selectFields = fields;
-    if (opts?.count === 'exact' && opts?.head) this._countOnly = true;
+  // ── chainable filters ──────────────────────────────────────
+  select(_f, opts) {
+    if (opts && opts.count === 'exact' && opts.head) this._countOnly = true;
     return this;
   }
-  eq(field, val)  { this._filters.push({field, op:'==', val}); return this; }
-  neq(field, val) { this._filters.push({field, op:'!=', val}); return this; }
-  not(field, _op, val) {
-    // Supabase: .not('score','is',null)  → field != null
-    this._notFilters.push({field, val}); return this;
-  }
-  is(field, val) {
-    // Supabase: .is('user_id', null)
-    this._isFilter = {field, val}; return this;
-  }
-  in(field, vals) { this._inFilter = {field, vals}; return this; }
-  or(filterStr) {
-    // e.g. "target_part.eq.all,target_part.eq.ولد"
-    const parts = filterStr.split(',');
-    parts.forEach(p => {
+  eq(field, val)           { this._wheres.push({field, op:'==',  val}); return this; }
+  neq(field, val)          { this._wheres.push({field, op:'!=',  val}); return this; }
+  not(field, _op, val)     { this._wheres.push({field, op:'!=',  val}); return this; }
+  is(field, val)           { this._wheres.push({field, op:'==',  val}); return this; }
+  in(field, vals)          { this._wheres.push({field, op:'in',  val:vals}); return this; }
+  gt(field, val)           { this._wheres.push({field, op:'>',   val}); return this; }
+  gte(field, val)          { this._wheres.push({field, op:'>=',  val}); return this; }
+  lt(field, val)           { this._wheres.push({field, op:'<',   val}); return this; }
+  lte(field, val)          { this._wheres.push({field, op:'<=',  val}); return this; }
+  order(field, opts)       { this._orders.push({field, dir: opts?.ascending===false?'desc':'asc'}); return this; }
+  limit(n)                 { this._limitN = n; return this; }
+  single()                 { this._isSingle = true; return this._exec(); }
+  or(str) {
+    str.split(',').forEach(p => {
       const m = p.match(/^(\w+)\.eq\.(.+)$/);
-      if (m) this._orFilters.push({field: m[1], val: m[2]});
+      if (m) this._orFilters.push({field:m[1], val:m[2]});
     });
     return this;
   }
-  order(field, opts) {
-    this._orders.push({field, dir: opts?.ascending === false ? 'desc' : 'asc'});
-    return this;
-  }
-  limit(n) { this._limitN = n; return this; }
-  single() { this._isSingle = true; return this._exec(); }
 
-  // Terminals
+  // ── build a Firestore query ref from filters ───────────────
+  _buildRef() {
+    // Separate id-filter (doc ID) from field-filters
+    const idFilter = this._wheres.find(w => w.field === 'id' && w.op === '==');
+    let ref = db.collection(this._col);
+    for (const w of this._wheres) {
+      if (w.field === 'id') continue;   // doc ID can't be used in where()
+      ref = ref.where(w.field, w.op, w.val);
+    }
+    for (const o of this._orders) ref = ref.orderBy(o.field, o.dir);
+    if (this._limitN) ref = ref.limit(this._limitN);
+    return { ref, idFilter };
+  }
+
+  // ── SELECT ─────────────────────────────────────────────────
   async _exec() {
     try {
-      let ref = db.collection(this._col);
-
-      // Simple eq filters
-      for (const f of this._filters) {
-        ref = ref.where(f.field, f.op, f.val);
-      }
-      // .not(field, 'is', null) → field != null
-      for (const f of this._notFilters) {
-        ref = ref.where(f.field, '!=', f.val);
-      }
-      // .is(field, null) → field == null
-      if (this._isFilter) {
-        ref = ref.where(this._isFilter.field, '==', this._isFilter.val);
-      }
-      // .in(field, [...])
-      if (this._inFilter) {
-        ref = ref.where(this._inFilter.field, 'in', this._inFilter.vals);
-      }
-
-      // Ordering
-      for (const o of this._orders) {
-        ref = ref.orderBy(o.field, o.dir);
-      }
-      if (this._limitN) ref = ref.limit(this._limitN);
-
-      // Count-only (for updateHomeStats)
-      if (this._countOnly) {
-        const snap = await ref.get();
-        return { count: snap.size, data: null, error: null };
-      }
-
-      // OR filter — Firestore doesn't support OR natively, so we fetch all and filter client-side
+      // OR filter — client-side since Firestore v8 SDK has no OR
       if (this._orFilters.length) {
         const snap = await db.collection(this._col).get();
-        let docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        let docs = snap.docs.map(d => ({id:d.id, ...d.data()}));
         docs = docs.filter(doc => this._orFilters.some(f => doc[f.field] == f.val));
-        // Also apply eq filters
-        for (const f of this._filters) {
-          if (f.op === '==') docs = docs.filter(d => d[f.field] == f.val);
+        for (const w of this._wheres) {
+          if (w.op === '==') docs = docs.filter(d => d[w.field] == w.val);
         }
-        // Sort
         for (const o of this._orders) {
           docs.sort((a,b) => {
-            const va = a[o.field], vb = b[o.field];
-            const cmp = va < vb ? -1 : va > vb ? 1 : 0;
-            return o.dir === 'asc' ? cmp : -cmp;
+            const va=a[o.field], vb=b[o.field];
+            const cmp = va<vb?-1:va>vb?1:0;
+            return o.dir==='asc'?cmp:-cmp;
           });
         }
-        if (this._isSingle) return { data: docs[0] || null, error: null };
-        return { data: docs, error: null };
+        if (this._isSingle) return {data: docs[0]||null, error:null};
+        return {data: docs, error:null};
+      }
+
+      const {ref, idFilter} = this._buildRef();
+
+      // Single doc by ID
+      if (idFilter) {
+        const snap = await db.collection(this._col).doc(idFilter.val).get();
+        if (!snap.exists) return {data: this._isSingle?null:[], error:null};
+        const doc = {id:snap.id, ...snap.data()};
+        return {data: this._isSingle?doc:[doc], error:null};
+      }
+
+      // Count only
+      if (this._countOnly) {
+        const snap = await ref.get();
+        return {count: snap.size, data:null, error:null};
       }
 
       const snap = await ref.get();
-      const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-
-      if (this._isSingle) return { data: docs[0] || null, error: null };
-      return { data: docs, error: null };
-    } catch(e) {
-      return { data: null, error: { message: e.message } };
-    }
+      const docs = snap.docs.map(d => ({id:d.id, ...d.data()}));
+      if (this._isSingle) return {data: docs[0]||null, error:null};
+      return {data: docs, error:null};
+    } catch(e) { return {data:null, error:{message:e.message}}; }
   }
 
-  // .select(...) terminal (returns promise)
   then(res, rej) { return this._exec().then(res, rej); }
 
+  // ── INSERT ─────────────────────────────────────────────────
   async insert(payload) {
     try {
       const ts = firebase.firestore.FieldValue.serverTimestamp();
       if (Array.isArray(payload)) {
-        const results = await Promise.all(payload.map(p => db.collection(this._col).add({...p, created_at: ts})));
-        return { data: results.map(r => ({id: r.id})), error: null };
+        const refs = await Promise.all(payload.map(p => db.collection(this._col).add({...p, created_at:ts})));
+        return {data: refs.map(r=>({id:r.id})), error:null};
       }
-      const ref = await db.collection(this._col).add({...payload, created_at: ts});
-      return { data: { id: ref.id }, error: null };
-    } catch(e) { return { data: null, error: { message: e.message } }; }
+      const ref = await db.collection(this._col).add({...payload, created_at:ts});
+      return {data: {id:ref.id}, error:null};
+    } catch(e) { return {data:null, error:{message:e.message}}; }
   }
 
+  // ── UPDATE ─────────────────────────────────────────────────
   async update(payload) {
     try {
-      // If filtering by 'id' (Firestore doc ID), use doc() directly
-      const idFilter = this._filters.find(f => f.field === 'id' && f.op === '==');
+      const idFilter = this._wheres.find(w => w.field==='id' && w.op==='==');
       if (idFilter) {
         await db.collection(this._col).doc(idFilter.val).update(payload);
-        return { data: null, error: null };
+        return {data:null, error:null};
       }
-
-      let ref = db.collection(this._col);
-      for (const f of this._filters) {
-        if (f.field === 'id') continue;
-        ref = ref.where(f.field, f.op, f.val);
-      }
+      // field-based update (e.g. .eq('folder_id', x))
+      const {ref} = this._buildRef();
       const snap = await ref.get();
       await Promise.all(snap.docs.map(d => d.ref.update(payload)));
-      return { data: null, error: null };
-    } catch(e) { return { data: null, error: { message: e.message } }; }
+      return {data:null, error:null};
+    } catch(e) { return {data:null, error:{message:e.message}}; }
   }
 
+  // ── DELETE ─────────────────────────────────────────────────
   async delete() {
     try {
-      // If filtering by 'id' (the Firestore doc ID), use doc() directly — far more reliable
-      const idFilter = this._filters.find(f => f.field === 'id' && f.op === '==');
+      const idFilter = this._wheres.find(w => w.field==='id' && w.op==='==');
       if (idFilter) {
         await db.collection(this._col).doc(idFilter.val).delete();
-        return { data: null, error: null };
+        return {data:null, error:null};
       }
-
-      let ref = db.collection(this._col);
-      for (const f of this._filters) {
-        if (f.field === 'id') continue; // skip — handled above
-        ref = ref.where(f.field, f.op, f.val);
-      }
-      if (this._isFilter) ref = ref.where(this._isFilter.field, '==', this._isFilter.val);
+      // field-based delete (e.g. .eq('folder_id', x) or .eq('file_path', x))
+      const {ref} = this._buildRef();
       const snap = await ref.get();
       await Promise.all(snap.docs.map(d => d.ref.delete()));
-      return { data: null, error: null };
-    } catch(e) { return { data: null, error: { message: e.message } }; }
+      return {data:null, error:null};
+    } catch(e) { return {data:null, error:{message:e.message}}; }
   }
-
-
 }
 
-// The main adapter — replaces sb.from(...)
-function fsFrom(colName) { return new FsQuery(colName); }
-
-// Monkey-patch: redirect all sb.from() calls to Firestore
-// We override after boot() initialises sb so Supabase Auth still works
-function patchSbFrom() {
-  if (!sb) return;
-  sb.from = (col) => fsFrom(col);
-}
+function fsFrom(col) { return new FsQuery(col); }
+function patchSbFrom() { if(sb) sb.from = col => fsFrom(col); }
 
 function hideLoading() {
   const ov = document.getElementById('loading-overlay');
@@ -1883,7 +1844,7 @@ function showSection(id) {
   document.getElementById('section-' + id)?.classList.add('active');
   const navId = { 'home':'nav-home','auth':'nav-auth','upload':'nav-upload','my-recordings':'nav-my','leaderboard':'nav-leaderboard','messages':'nav-messages','admin':'nav-admin','profile':'nav-profile','youtube':'nav-youtube' }[id];
   if (navId) { const btn = document.getElementById(navId); if (btn) btn.classList.add('active'); }
-  if (id === 'leaderboard')   renderLeaderboard();
+  if (id === 'leaderboard')   { leaderboardCache=[]; renderLeaderboard(); }
   if (id === 'messages')      renderMessages();
   if (id === 'admin')         { renderAdminRecordings(); renderAdminVMList(); loadMissingMembers(); renderAdminFolders(); }
   if (id === 'my-recordings') renderMyRecordings();
@@ -2154,7 +2115,7 @@ async function doUpload() {
   const btn  = document.getElementById('btn-submit-upload');
   prog.style.display = 'block';
   btn.disabled = true;
-  setProgressUI(5, 'جاري الرفع على Cloudinary…');
+  setProgressUI(5, 'جاري الرفع على الموقع…');
 
   const url = await uploadAudioToCloudinary(
     blob,
@@ -2573,8 +2534,7 @@ async function adminScore(recId){
   }
 
   const fb=document.getElementById('fb-'+recId).value.trim();
-  const{error}=await sb.from('recordings').update({score:scoreVal,feedback:fb}).eq('id',recId);
-  if(error){showToast('خطأ: '+error.message);return;}
+  try{await db.collection('recordings').doc(recId).update({score:scoreVal,feedback:fb});}catch(e){showToast('خطأ: '+e.message);return;}
 
   // Update folder item relation if the dropdown is present
   const folderSelect = document.getElementById('fol-' + recId);
@@ -2594,7 +2554,7 @@ async function adminScore(recId){
       let dbErr;
       if (newFolderId) {
         // Also update folder_id directly on the recordings doc for consistency
-        await sb.from('recordings').update({ folder_id: newFolderId }).eq('id', recId);
+        await db.collection('recordings').doc(recId).update({ folder_id: newFolderId });
 
         if (existingItem) {
           const { error } = await sb.from('folder_items').update({ 
@@ -2615,10 +2575,9 @@ async function adminScore(recId){
         }
       } else {
         // Clear folder_id on recordings doc too
-        await sb.from('recordings').update({ folder_id: null }).eq('id', recId);
+        await db.collection('recordings').doc(recId).update({ folder_id: null });
         if (existingItem) {
-          const { error } = await sb.from('folder_items').delete().eq('id', existingItem.id);
-          dbErr = error;
+          try{await db.collection('folder_items').doc(existingItem.id).delete();}catch(e){dbErr={message:e.message};}
         }
       }
 
@@ -2635,8 +2594,7 @@ async function adminScore(recId){
 async function deleteRecording(recId, filePathOrUrl) {
   if (!confirm('هل تريد حذف هذا التسجيل؟')) return;
   if (filePathOrUrl && filePathOrUrl.startsWith('http')) { await deleteCloudinaryAsset(filePathOrUrl); }
-  const { error } = await sb.from('recordings').delete().eq('id', recId);
-  if (error) { showToast('خطأ: ' + error.message); return; }
+  try{await db.collection('recordings').doc(recId).delete();}catch(e){showToast('خطأ: '+e.message);return;}
   document.getElementById('ri-' + recId)?.remove();
   showToast('تم الحذف.'); updateHomeStats();
 }
@@ -2695,8 +2653,10 @@ async function renderAdminFolders(){
   const{data:folders,error}=await sb.from('voice_folders').select('*').order('created_at',{ascending:false});
   if(error){list.innerHTML=`<div class="empty-state"><p>Error: ${error.message}</p></div>`;return;}
   if(!folders||!folders.length){list.innerHTML='<div class="empty-state"><div class="es-icon">📁</div><p>لم يتم إنشاء أي مجلد بعد.</p></div>';return;}
-  const{data:allItems}=await sb.from('folder_items').select('*').is('user_id', null).order('created_at');
-  const byFolder={};(allItems||[]).forEach(fi=>{(byFolder[fi.folder_id]=byFolder[fi.folder_id]||[]).push(fi);});
+  // Fetch admin-uploaded items (no user_id) — Firestore can't query null, so filter client-side
+  const{data:allItemsRaw}=await sb.from('folder_items').select('*').order('created_at',{ascending:true});
+  const allItems=(allItemsRaw||[]).filter(fi=>!fi.user_id);
+  const byFolder={};allItems.forEach(fi=>{(byFolder[fi.folder_id]=byFolder[fi.folder_id]||[]).push(fi);});
   const parts=await Promise.all(folders.map(async f=>{
     const items=byFolder[f.id]||[];
     const targetLbl=f.target_part==='all'?'الكل':f.target_part;
@@ -2708,16 +2668,17 @@ async function renderAdminFolders(){
 function openAddFIModal(folderId,folderName){document.getElementById('fi-folder-id').value=folderId;document.getElementById('fi-folder-name-label').textContent=folderName||'';document.getElementById('fi-title').value='';document.getElementById('fi-note').value='';document.getElementById('fi-selected-file').textContent='';document.getElementById('fi-recorded-wrap').style.display='none';document.getElementById('fi-upload-progress').style.display='none';fiMicBlob=null;fiMicMimeType='';fiSelectedFile=null;openModal('modal-add-fi');}
 async function deleteFolder(folderId){
   if(!confirm('حذف المجلد وكل تسجيلاته؟'))return;
-  const{data:items}=await sb.from('folder_items').select('file_path').eq('folder_id',folderId);
-  if(items?.length){await Promise.all(items.map(i=>{if(i.file_path&&i.file_path.startsWith('http'))return deleteCloudinaryAsset(i.file_path);return Promise.resolve();}));}
-  await sb.from('folder_items').delete().eq('folder_id',folderId);
-  await sb.from('voice_folders').delete().eq('id',folderId);
+  try {
+    const fiSnap=await db.collection('folder_items').where('folder_id','==',folderId).get();
+    await Promise.all(fiSnap.docs.map(async d=>{const fp=d.data().file_path;if(fp&&fp.startsWith('http'))await deleteCloudinaryAsset(fp);await d.ref.delete();}));
+    await db.collection('voice_folders').doc(folderId).delete();
+  } catch(e){showToast('خطأ: '+e.message);return;}
   showToast('تم حذف المجلد.');renderAdminFolders();
 }
 async function deleteFolderItem(fiId,filePathOrUrl){
   if(!confirm('حذف هذا التسجيل من المجلد؟'))return;
   if(filePathOrUrl.startsWith('http')){await deleteCloudinaryAsset(filePathOrUrl);}
-  await sb.from('folder_items').delete().eq('id',fiId);
+  try{await db.collection('folder_items').doc(fiId).delete();}catch(e){showToast('خطأ: '+e.message);return;}
   showToast('تم الحذف.');renderAdminFolders();
 }
 
@@ -2787,8 +2748,10 @@ async function renderMessages(){
   const tabsWrap=document.getElementById('msg-folder-tabs-wrap');const panelsWrap=document.getElementById('msg-folder-panels-wrap');tabsWrap.innerHTML='';panelsWrap.innerHTML='';
   const{data:folders}=await sb.from('voice_folders').select('*').order('created_at',{ascending:false});
   if(!folders||!folders.length)return;
-  const{data:allItems}=await sb.from('folder_items').select('*').is('user_id', null).order('created_at');
-  const byFolder={};(allItems||[]).forEach(fi=>{(byFolder[fi.folder_id]=byFolder[fi.folder_id]||[]).push(fi);});
+  // Fetch admin-uploaded items (no user_id) — Firestore can't query null, so filter client-side
+  const{data:allItemsRaw}=await sb.from('folder_items').select('*').order('created_at',{ascending:true});
+  const allItems=(allItemsRaw||[]).filter(fi=>!fi.user_id);
+  const byFolder={};allItems.forEach(fi=>{(byFolder[fi.folder_id]=byFolder[fi.folder_id]||[]).push(fi);});
   tabsWrap.innerHTML=folders.map(f=>{const cnt=(byFolder[f.id]||[]).length;return `<button class="msg-tab-btn" id="msg-tab-${f.id}" onclick="switchMsgTab('${f.id}',this)">📁 ${f.name} <span class="tab-count-badge">${cnt}</span></button>`;}).join('');
   const panelParts=await Promise.all(folders.map(async f=>{
     const items=byFolder[f.id]||[];let bodyHTML='';
@@ -2829,17 +2792,22 @@ async function renderAdminVMList(){
   const{data,error}=await sb.from('voice_messages').select('*').order('created_at',{ascending:false});
   if(error){list.innerHTML=`<p style="color:var(--text-muted)">Error: ${error.message}</p>`;return;}
   if(!data.length){list.innerHTML='<div class="empty-state"><div class="es-icon">📣</div><p>لم يتم إرسال أي رسائل مباشرة بعد.</p></div>';return;}
-  const items=await Promise.all(data.map(async vm=>{const url=vm.file_path?await getAudioURL(vm.file_path):null;const date=fsDateStr(vm.created_at);const audioEl=url?`<div class="cap-compact">${createAudioPlayer(url,true)}</div>`:'';return `<div class="voice-msg-box" style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;"><div class="voice-msg-avatar">${vm.file_path&&vm.file_path!==''?'📣':'✉️'}</div><div style="flex:1;min-width:130px;"><div class="voice-msg-title">${vm.title}</div><div style="font-family:var(--arabic);font-size:0.78rem;color:var(--text-muted);">إلى: <strong style="color:var(--gold-light);">${vm.target_part==='all'?'الكل':vm.target_part}</strong> · ${date}</div>${vm.note?`<div class="voice-msg-note" style="margin-bottom:0;margin-top:0.2rem;">${vm.note}</div>`:''}</div>${audioEl}<button class="btn btn-danger" style="padding:0.3rem 0.8rem;font-size:0.75rem;" onclick="deleteVoiceMessage('${vm.id}',${vm.file_path?`'${vm.file_path}'`:'null'})">حذف</button></div>`;}));
+  const items=await Promise.all(data.map(async vm=>{const url=vm.file_path?await getAudioURL(vm.file_path):null;const date=fsDateStr(vm.created_at);const audioEl=url?`<div class="cap-compact">${createAudioPlayer(url,true)}</div>`:'';return `<div class="voice-msg-box" style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;"><div class="voice-msg-avatar">${vm.file_path&&vm.file_path!==''?'📣':'✉️'}</div><div style="flex:1;min-width:130px;"><div class="voice-msg-title">${vm.title}</div><div style="font-family:var(--arabic);font-size:0.78rem;color:var(--text-muted);">إلى: <strong style="color:var(--gold-light);">${vm.target_part==='all'?'الكل':vm.target_part}</strong> · ${date}</div>${vm.note?`<div class="voice-msg-note" style="margin-bottom:0;margin-top:0.2rem;">${vm.note}</div>`:''}</div>${audioEl}<button class="btn btn-danger" style="padding:0.3rem 0.8rem;font-size:0.75rem;" data-vm-id="${vm.id}" data-file-path="${vm.file_path||''}" onclick="deleteVoiceMessage('${vm.id}')">حذف</button></div>`;}));
   list.innerHTML=items.join('');
 }
-async function deleteVoiceMessage(vmId,filePathOrUrl){
-  if(!confirm('هل تريد حذف هذه الرسالة؟'))return;
-  if(filePathOrUrl&&filePathOrUrl!=='null'&&filePathOrUrl!==''){
-    if(filePathOrUrl.startsWith('http')){await deleteCloudinaryAsset(filePathOrUrl);}
+async function deleteVoiceMessage(vmId, filePathOrUrl){
+  if(!confirm('هل تريد حذف هذه الرسالة؟')) return;
+  // Use the button's data attribute for safe file path, fallback to passed arg
+  const btn = document.querySelector(`button[data-vm-id="${vmId}"]`);
+  const safeFilePath = (btn && btn.dataset.filePath) ? btn.dataset.filePath : filePathOrUrl;
+  if(safeFilePath && safeFilePath !== 'null' && safeFilePath !== '' && safeFilePath.startsWith('http')){
+    await deleteCloudinaryAsset(safeFilePath);
   }
-  const{error}=await sb.from('voice_messages').delete().eq('id',vmId);
-  if(error){showToast('خطأ: '+error.message);return;}
-  showToast('تم الحذف.');renderAdminVMList();
+  try {
+    await db.collection('voice_messages').doc(vmId).delete();
+  } catch(e) { showToast('خطأ: ' + e.message); return; }
+  showToast('تم الحذف.');
+  renderAdminVMList();
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2992,8 +2960,13 @@ async function createYTFolder() {
 
 async function deleteYTFolder(folderId) {
   if (!confirm('حذف هذا المجلد؟ الفيديوهات داخله ستصبح غير مصنفة.')) return;
-  await sb.from('youtube_videos').update({ folder_id: null }).eq('folder_id', folderId);
-  const { error } = await sb.from('yt_folders').delete().eq('id', folderId);
+  // Unlink videos from this folder, then delete the folder doc
+  try{
+    const ytSnap=await db.collection('youtube_videos').where('folder_id','==',folderId).get();
+    await Promise.all(ytSnap.docs.map(d=>d.ref.update({folder_id:null})));
+    await db.collection('yt_folders').doc(folderId).delete();
+  }catch(e){showToast('خطأ: '+e.message);return;}
+  const error=null;
   if (error) { showToast('خطأ: ' + error.message); return; }
   showToast('تم حذف المجلد.');
   renderYoutube();
@@ -3061,7 +3034,8 @@ async function saveYoutubeVideo() {
 
 async function deleteYoutubeVideo(id) {
   if (!confirm('حذف هذا الفيديو؟')) return;
-  const { error } = await sb.from('youtube_videos').delete().eq('id', id);
+  let error=null;
+  try{await db.collection('youtube_videos').doc(id).delete();}catch(e){error={message:e.message};}
   if (error) { showToast('خطأ: ' + error.message); return; }
   showToast('تم الحذف.');
   renderYoutube();
@@ -3071,36 +3045,95 @@ async function deleteYoutubeVideo(id) {
 //  LEADERBOARD
 // ═══════════════════════════════════════════════════════════
 let leaderboardCache=[];
+async function buildLeaderboardCache(){
+  // Always fetch fresh data
+  const { data: _lbRecs }  = await sb.from('recordings').select('*');
+  const { data: _lbProfs } = await sb.from('profiles').select('id,name,voice_part,avatar_url').eq('is_admin', false);
+  const _pm = {}; (_lbProfs||[]).forEach(p => { _pm[p.id]=p; });
+  const _sm = {};
+  (_lbRecs||[]).forEach(r => {
+    if(!r.user_id) return;
+    if(!_sm[r.user_id]) _sm[r.user_id]={scores:[],total:0};
+    _sm[r.user_id].total++;
+    const s = Number(r.score);
+    if(r.score!==null && r.score!==undefined && r.score!=='' && !isNaN(s)) _sm[r.user_id].scores.push(s);
+  });
+  leaderboardCache = Object.keys(_sm)
+    .filter(uid => _pm[uid] && _pm[uid].name)  // only real users with profiles
+    .map(uid => {
+      const p  = _pm[uid];
+      const sc = _sm[uid];
+      const avg  = sc.scores.length ? Math.round(sc.scores.reduce((a,b)=>a+b,0)/sc.scores.length) : null;
+      const best = sc.scores.length ? Math.max(...sc.scores) : null;
+      return {
+        id: uid,
+        name: p.name,
+        voice_part: p.voice_part||'',
+        avatar_url: p.avatar_url||null,
+        avg_score: avg,
+        best_score: best,
+        total_recordings: sc.total,
+        scored_count: sc.scores.length
+      };
+    })
+    .sort((a,b) => {
+      // Scored users first, sorted by avg desc; unscored users after, sorted by total desc
+      const aHas = a.avg_score !== null;
+      const bHas = b.avg_score !== null;
+      if(aHas && bHas) return b.avg_score - a.avg_score;
+      if(aHas) return -1;
+      if(bHas) return 1;
+      return b.total_recordings - a.total_recordings;
+    });
+}
+
 async function renderLeaderboard(){
-  const list=document.getElementById('leaderboard-list');
-  const search=(document.getElementById('leader-search')?.value||'').toLowerCase();
-  const partFilter=document.getElementById('leader-filter')?.value||'';
+  const list = document.getElementById('leaderboard-list');
+  const search = (document.getElementById('leader-search')?.value||'').trim().toLowerCase();
+
+  // Fetch fresh data if cache empty
   if(!leaderboardCache.length){
     list.innerHTML='<div class="empty-state"><div class="spinner" style="margin:0 auto;"></div></div>';
-    // Build leaderboard from Firestore
-    const { data: _lbRecs }  = await sb.from('recordings').select('*');
-    const { data: _lbProfs } = await sb.from('profiles').select('id,name,voice_part,avatar_url').eq('is_admin', false);
-    const _pm = {}; (_lbProfs||[]).forEach(p => { _pm[p.id]=p; });
-    const _sm = {}; (_lbRecs||[]).forEach(r => {
-      if(!_sm[r.user_id]) _sm[r.user_id]={scores:[],total:0};
-      _sm[r.user_id].total++;
-      if(r.score!==null&&r.score!==undefined) _sm[r.user_id].scores.push(r.score);
-    });
-    leaderboardCache = Object.keys(_sm).filter(uid => _pm[uid] && _pm[uid].name).map(uid=>{
-      const p=_pm[uid]||{}; const sc=_sm[uid];
-      const avg=sc.scores.length?Math.round(sc.scores.reduce((a,b)=>a+b,0)/sc.scores.length):null;
-      const best=sc.scores.length?Math.max(...sc.scores):null;
-      return {id:uid,name:p.name||'Unknown',voice_part:p.voice_part||'',avatar_url:p.avatar_url||null,avg_score:avg,best_score:best,total_recordings:sc.total};
-    }).sort((a,b)=>(b.avg_score||0)-(a.avg_score||0));
+    await buildLeaderboardCache();
   }
-  let leaders=leaderboardCache;
-  if(search)leaders=leaders.filter(l=>l.name.toLowerCase().includes(search));
-  if(!leaders.length){list.innerHTML='<div class="empty-state"><div class="es-icon">🏆</div><p>لا توجد نتائج بعد.</p></div>';return;}
-  list.innerHTML=leaders.map((l,i)=>{
-    const rank=i+1;const rankClass=rank<=3?'rank-'+rank:'';
-    const medal=rank===1?'🥇':rank===2?'🥈':rank===3?'🥉':rank;
-    const avHTML=avatarHTML(l.avatar_url,l.name,42);
-    return `<div class="leaderboard-item ${rankClass}"><div class="rank-num">${rank<=3?medal:rank}</div>${avHTML}<div class="leader-info"><div class="leader-name">${l.name}</div></div><div class="leader-stats"><div class="stat-pill"><div class="s-val">${l.avg_score??'—'}</div><div class="s-lbl">المتوسط</div></div><div class="stat-pill"><div class="s-val">${l.best_score??'—'}</div><div class="s-lbl">الأعلى</div></div><div class="stat-pill"><div class="s-val">${l.total_recordings}</div><div class="s-lbl">تسجيلات</div></div></div></div>`;
+
+  // Apply search filter
+  let leaders = leaderboardCache;
+  if(search) leaders = leaders.filter(l => l.name.toLowerCase().includes(search));
+
+  if(!leaders.length){
+    list.innerHTML='<div class="empty-state"><div class="es-icon">🏆</div><p>' +
+      (search ? 'لا توجد نتائج للبحث.' : 'لا توجد تسجيلات بعد.') +
+      '</p></div>';
+    return;
+  }
+
+  // Assign ranks only to scored users; unscored get no rank medal
+  let rankCounter = 0;
+  list.innerHTML = leaders.map((l) => {
+    const hasScore = l.avg_score !== null;
+    if(hasScore) rankCounter++;
+    const rank = hasScore ? rankCounter : null;
+    const rankClass = rank===1?'rank-1':rank===2?'rank-2':rank===3?'rank-3':'';
+    const medal = rank===1?'🥇':rank===2?'🥈':rank===3?'🥉':(rank?rank:'—');
+    const avHTML = avatarHTML(l.avatar_url, l.name, 42);
+    const partBadge = l.voice_part
+      ? `<span style="font-family:var(--arabic);font-size:0.68rem;color:var(--text-muted);margin-top:0.1rem;">${l.voice_part}</span>`
+      : '';
+    return `<div class="leaderboard-item ${rankClass}">
+      <div class="rank-num">${medal}</div>
+      ${avHTML}
+      <div class="leader-info">
+        <div class="leader-name">${l.name}</div>
+        ${partBadge}
+      </div>
+      <div class="leader-stats">
+        <div class="stat-pill"><div class="s-val">${l.avg_score??'—'}</div><div class="s-lbl">المتوسط</div></div>
+        <div class="stat-pill"><div class="s-val">${l.best_score??'—'}</div><div class="s-lbl">الأعلى</div></div>
+        <div class="stat-pill"><div class="s-val">${l.total_recordings}</div><div class="s-lbl">تسجيلات</div></div>
+        <div class="stat-pill"><div class="s-val">${l.scored_count}</div><div class="s-lbl">مُقيَّم</div></div>
+      </div>
+    </div>`;
   }).join('');
 }
 
@@ -3567,14 +3600,15 @@ async function addFolderItem() {
 // ═══════════════════════════════════════════════════════════
 async function deleteFolderItem(fiId, filePathOrUrl) {
   if (!confirm('حذف هذا التسجيل من المجلد؟')) return;
- 
-  if (filePathOrUrl.startsWith('http')) {
+
+  if (filePathOrUrl && filePathOrUrl.startsWith('http')) {
     await deleteCloudinaryAsset(filePathOrUrl);
-  } else {
-    /* Supabase storage removed */
   }
- 
-  await sb.from('folder_items').delete().eq('id', fiId);
+
+  try {
+    await db.collection('folder_items').doc(fiId).delete();
+  } catch(e) { showToast('خطأ: ' + e.message); return; }
+
   showToast('تم الحذف.');
   renderAdminFolders();
 }
@@ -3584,20 +3618,22 @@ async function deleteFolderItem(fiId, filePathOrUrl) {
 // ═══════════════════════════════════════════════════════════
 async function deleteFolder(folderId) {
   if (!confirm('حذف المجلد وكل تسجيلاته؟')) return;
- 
-  const { data: items } = await sb.from('folder_items')
-    .select('file_path')
-    .eq('folder_id', folderId);
- 
-  if (items?.length) {
-    await Promise.all(items.map(i => {
-      if (i.file_path.startsWith('http')) return deleteCloudinaryAsset(i.file_path);
-      return Promise.resolve(); /* Supabase storage removed */
+
+  // Fetch all folder_items for this folder
+  try {
+    const itemsSnap = await db.collection('folder_items').where('folder_id', '==', folderId).get();
+
+    // Delete Cloudinary assets + folder_item docs in parallel
+    await Promise.all(itemsSnap.docs.map(async d => {
+      const fp = d.data().file_path;
+      if (fp && fp.startsWith('http')) await deleteCloudinaryAsset(fp);
+      await d.ref.delete();
     }));
-  }
- 
-  await sb.from('folder_items').delete().eq('folder_id', folderId);
-  await sb.from('voice_folders').delete().eq('id', folderId);
+
+    // Delete the folder doc itself
+    await db.collection('voice_folders').doc(folderId).delete();
+  } catch(e) { showToast('خطأ: ' + e.message); return; }
+
   showToast('تم حذف المجلد.');
   renderAdminFolders();
 }
@@ -3678,17 +3714,20 @@ async function sendVoiceMessage() {
 // ═══════════════════════════════════════════════════════════
 async function deleteVoiceMessage(vmId, filePathOrUrl) {
   if (!confirm('هل تريد حذف هذه الرسالة؟')) return;
- 
-  if (filePathOrUrl && filePathOrUrl !== 'null' && filePathOrUrl !== '') {
-    if (filePathOrUrl.startsWith('http')) {
-      await deleteCloudinaryAsset(filePathOrUrl);
-    } else {
-      /* Supabase storage removed */
-    }
+
+  // Read file_path safely from the button's data attribute
+  const btn = document.querySelector(`button[data-vm-id="${vmId}"]`);
+  const safeFilePath = (btn && btn.dataset.filePath) ? btn.dataset.filePath : (filePathOrUrl || '');
+
+  if (safeFilePath && safeFilePath !== 'null' && safeFilePath !== '' && safeFilePath.startsWith('http')) {
+    await deleteCloudinaryAsset(safeFilePath);
   }
- 
-  const { error } = await sb.from('voice_messages').delete().eq('id', vmId);
-  if (error) { showToast('خطأ: ' + error.message); return; }
+
+  // Delete directly by Firestore doc ID — bypasses adapter entirely
+  try {
+    await db.collection('voice_messages').doc(vmId).delete();
+  } catch(e) { showToast('خطأ: ' + e.message); return; }
+
   showToast('تم الحذف.');
   renderAdminVMList();
 }
