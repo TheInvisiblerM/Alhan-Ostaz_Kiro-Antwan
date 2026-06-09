@@ -780,7 +780,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 <div class="modal-backdrop" id="modal-create-yt-folder">
   <div class="modal-box">
     <button class="modal-close" onclick="closeModal('modal-create-yt-folder')">✕</button>
-    <div class="modal-title">📁 إنشاء مجلد يوتيوب</div>
+    <div class="modal-title">📁 إنشاء مجلد للفيديوهات</div>
     <div class="form-group"><label>اسم المجلد</label><input type="text" id="yt-folder-name" placeholder="مثال: ألحان القداس"></div>
     <div class="form-group"><label>وصف (اختياري)</label><textarea id="yt-folder-desc" rows="2" placeholder="وصف مختصر…"></textarea></div>
     <div style="display:flex; gap:0.7rem; margin-top:0.5rem; flex-wrap:wrap;">
@@ -943,7 +943,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
     <div class="nav-separator"></div>
     <button class="nav-item" id="nav-upload"   onclick="showSection('upload')"        style="display:none"><span class="nav-icon">⬆️</span> رفع تسجيل</button>
     <button class="nav-item" id="nav-my"       onclick="showSection('my-recordings')" style="display:none"><span class="nav-icon">🎵</span> تسجيلاتي</button>
-    <button class="nav-item" id="nav-youtube" onclick="showSection('youtube')"><span class="nav-icon">▶</span> فيديوهات يوتيوب</button>
+    <button class="nav-item" id="nav-youtube" onclick="showSection('youtube')"><span class="nav-icon">▶</span> فيديوهات</button>
     <button class="nav-item" id="nav-messages" onclick="showSection('messages')"      style="display:none"><span class="nav-icon">📣</span> الرسائل</button>
     <button class="nav-item" id="nav-profile"  onclick="showSection('profile')"       style="display:none"><span class="nav-icon">👤</span> صفحتي</button>
     <div class="nav-separator" id="admin-sep" style="display:none;"></div>
@@ -1187,7 +1187,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
     <!-- YOUTUBE -->
     <section class="section" id="section-youtube">
       <div class="section-heading">
-        <h2>▶ فيديوهات يوتيوب</h2>
+        <h2>▶ فيديوهات</h2>
         <p>"Praise Him with strings and pipe." — Psalm 150:4</p>
       </div>
       <div id="yt-admin-bar" style="display:none; margin-bottom:1.4rem; display:flex; gap:0.8rem; flex-wrap:wrap; align-items:center;">
@@ -1283,7 +1283,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   <button class="mbn-btn active" id="mbn-home"        onclick="showSection('home');        updateMBN('home')">       <span class="mbn-icon">🏠</span><span class="mbn-label">الرئيسية</span></button>
   <button class="mbn-btn"        id="mbn-leaderboard" onclick="showSection('leaderboard'); updateMBN('leaderboard')"><span class="mbn-icon">🏆</span><span class="mbn-label">المراكز</span></button>
   <button class="mbn-btn"        id="mbn-upload"      onclick="showSection('upload');      updateMBN('upload')"   style="display:none"><span class="mbn-icon">⬆️</span><span class="mbn-label">رفع</span></button>
-  <button class="mbn-btn"        id="mbn-youtube"     onclick="showSection('youtube');     updateMBN('youtube')"  ><span class="mbn-icon">▶</span><span class="mbn-label">يوتيوب</span></button>
+  <button class="mbn-btn"        id="mbn-youtube"     onclick="showSection('youtube');     updateMBN('youtube')"  ><span class="mbn-icon">▶</span><span class="mbn-label">فيديوهات</span></button>
   <button class="mbn-btn"        id="mbn-messages"    onclick="showSection('messages');    updateMBN('messages')" style="display:none"><span class="mbn-icon">📣</span><span class="mbn-label">الرسائل</span></button>
   <button class="mbn-btn"        id="mbn-my"          onclick="showSection('my-recordings');updateMBN('my')"      style="display:none"><span class="mbn-icon">🎵</span><span class="mbn-label">تسجيلاتي</span></button>
   <button class="mbn-btn"        id="mbn-profile"     onclick="showSection('profile');     updateMBN('profile')"  style="display:none"><span class="mbn-icon">👤</span><span class="mbn-label">صفحتي</span></button>
