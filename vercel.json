@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/virgin_mary_church_supabase.html"
+    }
+  ]
+}
