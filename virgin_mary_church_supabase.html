@@ -750,8 +750,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .album-desc { font-family:var(--arabic); font-size:.78rem; color:var(--text-muted); margin-bottom:.5rem; min-height:1.1em; }
 .album-meta { display:flex; align-items:center; justify-content:space-between; gap:.5rem; }
 .album-count { font-family:var(--arabic); font-size:.72rem; color:var(--text-muted); }
-.album-admin-actions { position:absolute; top:.5rem; left:.5rem; display:flex; gap:.3rem; opacity:0; transition:opacity .2s; }
+.album-admin-actions { position:absolute; top:.5rem; left:.5rem; display:flex; gap:.3rem; opacity:0; transition:opacity .2s; z-index:10; }
 .album-card:hover .album-admin-actions { opacity:1; }
+@media (hover: none) { .album-admin-actions { opacity:1; } }
 .album-action-btn { width:30px; height:30px; border-radius:50%; border:none; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:.75rem; backdrop-filter:blur(8px); transition:all .2s; }
 .album-del-btn { background:rgba(192,57,43,.75); color:#fff; }
 .album-del-btn:hover { background:rgba(192,57,43,.95); }
@@ -769,8 +770,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .photo-thumb img { width:100%; height:100%; object-fit:cover; display:block; }
 .photo-thumb-caption { position:absolute; bottom:0; left:0; right:0; background:linear-gradient(transparent,rgba(0,0,0,.7)); padding:.6rem .5rem .4rem; font-family:var(--arabic); font-size:.7rem; color:#fff; opacity:0; transition:opacity .2s; }
 .photo-thumb:hover .photo-thumb-caption { opacity:1; }
-.photo-admin-del { position:absolute; top:.3rem; left:.3rem; width:26px; height:26px; border-radius:50%; border:none; background:rgba(192,57,43,.8); color:#fff; display:none; align-items:center; justify-content:center; cursor:pointer; font-size:.7rem; }
-.photo-thumb:hover .photo-admin-del { display:flex; }
+.photo-admin-del { position:absolute; top:.3rem; left:.3rem; width:32px; height:32px; border-radius:50%; border:none; background:rgba(192,57,43,.85); color:#fff; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:.8rem; opacity:0; pointer-events:none; transition:all .2s; z-index:10; }
+.photo-thumb:hover .photo-admin-del { opacity:1; pointer-events:auto; }
+@media (hover: none) { .photo-admin-del { opacity:1; pointer-events:auto; } }
 .photo-admin-del:hover { background:rgba(192,57,43,1); }
 
 #gallery-lightbox { display:none; position:fixed; inset:0; z-index:700; background:rgba(0,0,0,.92); backdrop-filter:blur(16px); align-items:center; justify-content:center; }
@@ -3979,7 +3981,7 @@ async function loadAlbums() {
           <button class="album-action-btn album-del-btn" onclick="event.stopPropagation();deleteAlbum('${album.id}')" title="Delete album">🗑</button>
         </div>` : '';
       return `
-        <div class="album-card" onclick="openAlbum('${album.id}','${(album.name||'').replace(/'/g,"\\'")}','${(album.description||'').replace(/'/g,"\\'")}')">
+        <div class="album-card" onclick="if(!event.target.closest('.album-admin-actions')) openAlbum('${album.id}','${(album.name||'').replace(/'/g,"\\'")}','${(album.description||'').replace(/'/g,"\\'")}')">
           ${adminActions}
           ${coverHtml}
           <div class="album-info">
@@ -4065,7 +4067,7 @@ async function loadAlbumPhotos(albumId) {
       const cap = p.caption || p.title || '';
       const delBtn = isAdmin ? `<button class="photo-admin-del" onclick="event.stopPropagation();deletePhoto('${p.id}','${p.file_path}')" title="Delete">🗑</button>` : '';
       return `
-        <div class="photo-thumb" onclick="openLightbox(${i})">
+        <div class="photo-thumb" onclick="if(!event.target.closest('.photo-admin-del')) openLightbox(${i})">
           ${delBtn}
           <img src="${p.file_path}" alt="${cap}" loading="lazy">
           ${cap ? `<div class="photo-thumb-caption">${cap}</div>` : ''}
